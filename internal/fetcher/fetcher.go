@@ -3,97 +3,101 @@ package fetcher
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"time"
+
 	"github.com/tomakado/containers/set"
+
+	"github.com/DailyPepper/telegram-bot/internal/model"
+
+	src "github.com/DailyPepper/telegram-bot/internal/source"
 )
 
+//go:generate moq --out=mocks/mock_article_storage.go --pkg=mocks . ArticleStorage
 type ArticleStorage interface {
-	Store(ctx context.Context, article model.Arcticle) error
+	Store(ctx context.Context, article model.Article) error
 }
-type SourceStorage struct{
+
+//go:generate moq --out=mocks/mock_sources_provider.go --pkg=mocks . SourcesProvider
+type SourcesProvider interface {
 	Sources(ctx context.Context) ([]model.Source, error)
 }
 
+//go:generate moq --out=mocks/mock_source.go --pkg=mocks . Source
 type Source interface {
 	ID() int64
 	Name() string
 	Fetch(ctx context.Context) ([]model.Item, error)
 }
 
-type Fethcer struct {
+type Fetcher struct {
 	articles ArticleStorage
-	sources  SourceStorage
+	sources  SourcesProvider
 
-	fetchInterval   time.Duration
-	filterKeyboards []string
+	fetchInterval  time.Duration
+	filterKeywords []string
 }
 
 func New(
-	articles ArticleStorage
-	sources  SourceStorage
-	fetchInterval   time.Duration
-	filterKeyboards []string
-) *Fethcer{
-	return &Fethcer{
-		articles: articleStorage,
-		sources:  sourceProvider,
-		fetchInterval:   fetchInterval,
-		filterKeyboards: filterKeyboards,
+	articleStorage ArticleStorage,
+	sourcesProvider SourcesProvider,
+	fetchInterval time.Duration,
+	filterKeywords []string,
+) *Fetcher {
+	return &Fetcher{
+		articles:       articleStorage,
+		sources:        sourcesProvider,
+		fetchInterval:  fetchInterval,
+		filterKeywords: filterKeywords,
 	}
 }
 
-func (f *Fethcer) Start(ctx context.Context) error{
+func (f *Fetcher) Start(ctx context.Context) error {
 	ticker := time.NewTicker(f.fetchInterval)
-
 	defer ticker.Stop()
 
-	if err := f.Fetch(ctx);
-	err := nil {
+	if err := f.Fetch(ctx); err != nil {
 		return err
 	}
 
 	for {
 		select {
-		case <- ctx.Done():
+		case <-ctx.Done():
 			return ctx.Err()
-		case <- ticker.C:
-			if err := f.Fetch(ctx);
-			err != nil{
+		case <-ticker.C:
+			if err := f.Fetch(ctx); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-func (f *Fethcer) Fetch(ctx context.Context) error{
+func (f *Fetcher) Fetch(ctx context.Context) error {
 	sources, err := f.sources.Sources(ctx)
-	if err := nil {
+	if err != nil {
 		return err
-	} 
+	}
 
 	var wg sync.WaitGroup
-	for  _, source := range sources{
+
+	for _, source := range sources {
 		wg.Add(1)
 
-		rssSource := source.NewRSSSourceFromModel(src)
-
-		go func(sorce Source){
+		go func(source Source) {
 			defer wg.Done()
 
-			items, err := sorce.Fetch(ctx)
-			if err != nil{
-				log.Panicln("[ERROR] Fetching items from source %s: %v")
-				return 
+			items, err := source.Fetch(ctx)
+			if err != nil {
+				log.Printf("[ERROR] failed to fetch items from source %q: %v", source.Name(), err)
+				return
 			}
 
-			if err := f.proccesItems(ctx, source, items);
-			err != nil {
-				log.Panicln("[ERROR] Processing items from source %s: %v")
-				return 
+			if err := f.processItems(ctx, source, items); err != nil {
+				log.Printf("[ERROR] failed to process items from source %q: %v", source.Name(), err)
+				return
 			}
-
-			}(rssSource)
+		}(src.NewRSSSourceFromModel(source))
 	}
 
 	wg.Wait()
@@ -101,38 +105,37 @@ func (f *Fethcer) Fetch(ctx context.Context) error{
 	return nil
 }
 
-func (f *Fetcher) proccesItems( ctx cotext.Context, source Source, items []model){
+func (f *Fetcher) processItems(ctx context.Context, source Source, items []model.Item) error {
 	for _, item := range items {
 		item.Date = item.Date.UTC()
 
-		if f.itemShouldBeSkipped(item){
+		if f.itemShouldBeSkipped(item) {
+			log.Printf("[INFO] item %q (%s) from source %q should be skipped", item.Title, item.Link, source.Name())
 			continue
 		}
 
-		if err := f.articles.Store(ctx, model.Arcticle{
-			SourceID: source.ID(),
-			Title: item.Title,
-			Link: item.Link,
-			Summary: item.Summary,
-			PublishedAt: time.Date,
-		}); err :=	nil {
+		if err := f.articles.Store(ctx, model.Article{
+			SourceID:    source.ID(),
+			Title:       item.Title,
+			Link:        item.Link,
+			Summary:     item.Summary,
+			PublishedAt: item.Date,
+		}); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
-func (f *Fetcher) itemShouldBeSkipped(item model.Item) bool{
-	categoriesSet := set.New(item.Categories)
+func (f *Fetcher) itemShouldBeSkipped(item model.Item) bool {
+	categoriesSet := set.New(item.Categories...)
 
-	for _, keyword := range f.filterKeyboards{
-		titleContainsKeyword := string.Contains(string.ToLower(item.Title), keyword)
-		
-		if categoriesSet.Contains(keyword) || titleContainsKeyword{
+	for _, keyword := range f.filterKeywords {
+		if categoriesSet.Contains(keyword) || strings.Contains(strings.ToLower(item.Title), keyword) {
 			return true
 		}
 	}
-	
-	return  false
-}
 
+	return false
+}
