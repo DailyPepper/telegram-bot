@@ -4,7 +4,6 @@ go 1.23.5
 
 require (
 	github.com/SlyMarbo/rss v1.0.5
-	github.com/defer-panic/news-feed-bot v0.0.0-20231031224948-23b7d5e1c1ea
 	github.com/go-shiori/go-readability v0.0.0-20241012063810-92284fa8a71f
 	github.com/lib/pq v1.10.9
 	github.com/samber/lo v1.47.0
